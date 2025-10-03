@@ -6,6 +6,8 @@ matplotlib>=3.7.0
 
 # LLM integration
 groq>=0.4.0
+openai>=1.0.0
 
 # Standard library dependencies (already included in Python)
 # json, math, random, time, re, os, dataclasses, typing
+
