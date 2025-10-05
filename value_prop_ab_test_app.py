@@ -431,7 +431,7 @@ This app lets you run an A/B test on two value propositions using synthetic resp
 - Format: "Criterion Name: Value1, Value2, Value3" (one per line)
 
 **API Options:**
-- **OpenAI**: Use OpenAI's API directly with models like GPT-4, GPT-3.5-turbo, etc. ⚠️ **Note: This option has cost implications - each respondent requires 2 API calls**
+- **OpenAI**: Use OpenAI's API directly with models GPT-5_Nano and GPT-4-mini ⚠️ **Note: This option has cost implications - each respondent requires 2 API calls**
 - **Groq**: Use Groq's fast inference API with open-source models 
 
 **Requirements:**
