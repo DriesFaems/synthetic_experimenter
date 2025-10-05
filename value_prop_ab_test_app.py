@@ -432,7 +432,7 @@ This app lets you run an A/B test on two value propositions using synthetic resp
 
 **API Options:**
 - **OpenAI**: Use OpenAI's API directly with models like GPT-4, GPT-3.5-turbo, etc. ⚠️ **Note: This option has cost implications - each respondent requires 2 API calls**
-- **Groq**: Use Groq's fast inference API with open-source models like Llama 3, Mixtral, etc.
+- **Groq**: Use Groq's fast inference API with open-source models 
 
 **Requirements:**
 - You must provide a valid API key for your chosen provider
@@ -467,19 +467,14 @@ This app lets you run an A/B test on two value propositions using synthetic resp
     # Model selection based on API provider
     if api_provider == "OpenAI":
         model_options = [
-            "gpt-4o",
-            "gpt-4o-mini", 
-            "gpt-4-turbo",
-            "gpt-4",
-            "gpt-3.5-turbo"
+            "gpt-4o-mini",
+            "gpt-5-nano" 
         ]
-        default_model = "gpt-3.5-turbo"
+        default_model = "gpt-5-nano"
     else:  # Groq
         model_options = [
-            "llama3-70b-8192",
-            "llama3-8b-8192",
-            "mixtral-8x7b-32768",
-            "gemma-7b-it"
+            "llama-3.3-70b-versatile",
+            "openai/gpt-oss-20b"
         ]
         default_model = "llama3-70b-8192"
     
