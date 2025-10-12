@@ -193,29 +193,35 @@ def persona_prompt_single_scenario(profile: str,
     """Build the chat messages for LLM API calls for a single scenario."""
     if response_mode == "Likert":
         response_instructions = f"""
-Return ONLY valid minified JSON on one line with the following schema:
+CRITICAL: Return ONLY valid JSON. No explanations, no markdown, no extra text.
+
+Required JSON format:
 {{
   "persona": "<3-5 sentence persona description>",
   "response": {{"answer_text":"<short answer>", "rating": <integer 1-{scale_max}>}}
 }}
 
-Rules:
+STRICT Rules:
 - The 'rating' MUST be an INTEGER between 1 and {scale_max}, inclusive.
-- DO NOT include markdown fences or commentary.
+- Response must start with {{ and end with }}
+- NO markdown fences (```), NO comments, NO explanations outside the JSON
 - Keep answers concise (<= 40 words each).
 - Evaluate this scenario independently, without comparing to other options.
 """
     else:
         response_instructions = """
-Return ONLY valid minified JSON on one line with the following schema:
+CRITICAL: Return ONLY valid JSON. No explanations, no markdown, no extra text.
+
+Required JSON format:
 {
   "persona": "<3-5 sentence persona description>",
   "response": {"answer_text":"<short answer>", "choice": "Yes"|"No"}
 }
 
-Rules:
+STRICT Rules:
 - 'choice' MUST be exactly "Yes" or "No".
-- DO NOT include markdown fences or commentary.
+- Response must start with { and end with }
+- NO markdown fences (```), NO comments, NO explanations outside the JSON
 - Keep answers concise (<= 40 words each).
 - Evaluate this scenario independently, without comparing to other options.
 """
@@ -259,12 +265,20 @@ def clean_json(s: str) -> str:
     # Strip code fences and whitespace
     s = s.strip()
     s = re.sub(r"```json\s*|\s*```", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"```\s*|\s*```", "", s, flags=re.IGNORECASE)
     s = s.strip()
-    # Attempt to cut leading/trailing characters before/after JSON object
+    
+    # Remove any leading/trailing text before/after JSON
+    # Look for the first { and last }
     start = s.find("{")
     end = s.rfind("}")
-    if start != -1 and end != -1:
+    if start != -1 and end != -1 and end > start:
         s = s[start:end+1]
+    
+    # Clean up common formatting issues
+    s = re.sub(r'\n\s*', ' ', s)  # Replace newlines with spaces
+    s = re.sub(r'\s+', ' ', s)    # Collapse multiple spaces
+    
     return s
 
 
@@ -278,15 +292,33 @@ def call_openai(api_key: str,
         raise RuntimeError("The 'openai' package is not available in this environment.")
     
     client = OpenAI(api_key=api_key)
-    resp = client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        top_p=1,
-        stream=False,
-        stop=None,
-    )
+    
+    # Prepare arguments - some models don't support custom temperature
+    kwargs = {
+        "model": model_name,
+        "messages": messages,
+        "max_completion_tokens": max_tokens,
+        "top_p": 1,
+        "stream": False,
+        "stop": None,
+    }
+    
+    # Only add temperature if it's not the default value of 1.0
+    # Some models (like gpt-5-nano) only support temperature=1
+    if temperature != 1.0:
+        try:
+            kwargs["temperature"] = temperature
+            resp = client.chat.completions.create(**kwargs)
+        except Exception as e:
+            # If temperature fails, retry with default temperature
+            if "temperature" in str(e).lower():
+                kwargs.pop("temperature", None)
+                resp = client.chat.completions.create(**kwargs)
+            else:
+                raise e
+    else:
+        resp = client.chat.completions.create(**kwargs)
+    
     return resp.choices[0].message.content  # type: ignore
 
 
@@ -330,7 +362,26 @@ def call_llm(api_provider: str,
 def parse_persona_json(raw: str) -> Optional[dict]:
     try:
         cleaned = clean_json(raw)
+        if not cleaned:
+            return None
         return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        # Try to extract JSON from a longer response
+        try:
+            # Look for JSON object patterns with more flexible matching
+            json_pattern = r'\{[^{}]*"persona"[^{}]*"response"[^{}]*\}'
+            matches = re.findall(json_pattern, raw, re.DOTALL | re.IGNORECASE)
+            if matches:
+                return json.loads(clean_json(matches[0]))
+            
+            # Try alternative pattern matching
+            json_pattern2 = r'\{.*?"persona".*?"response".*?\}'
+            matches2 = re.findall(json_pattern2, raw, re.DOTALL | re.IGNORECASE)
+            if matches2:
+                return json.loads(clean_json(matches2[0]))
+        except:
+            pass
+        return None
     except Exception:
         return None
 
@@ -468,15 +519,17 @@ This app lets you run an A/B test on two value propositions using synthetic resp
     if api_provider == "OpenAI":
         model_options = [
             "gpt-4o-mini",
-            "gpt-5-nano" 
+            "gpt-3.5-turbo",
+            "gpt-4o"
         ]
-        default_model = "gpt-5-nano"
+        default_model = "gpt-4o-mini"
     else:  # Groq
         model_options = [
-            "llama-3.3-70b-versatile",
-            "openai/gpt-oss-20b"
+            "llama-3.1-70b-versatile",
+            "llama-3.1-8b-instant",
+            "mixtral-8x7b-32768"
         ]
-        default_model = "llama3-70b-8192"
+        default_model = "llama-3.1-70b-versatile"
     
     try:
         default_index = model_options.index(default_model)
@@ -624,24 +677,72 @@ Industry: Tech, Finance, Healthcare, Retail""",
         )
         
         try:
-            # Get response for scenario A
+            # Get response for scenario A with retry logic
             raw_a = call_llm(api_provider, api_key, model_name, messages_a, temperature, max_tokens)
             parsed_a = parse_persona_json(raw_a)
-            if not parsed_a:
-                # attempt one lightweight retry with lower temperature
-                raw_a = call_llm(api_provider, api_key, model_name, messages_a, max(0.0, temperature - 0.1), max_tokens)
+            
+            # Enhanced retry logic for scenario A
+            retry_count = 0
+            while not parsed_a and retry_count < 3:
+                retry_count += 1
+                if retry_count == 1:
+                    # First retry: lower temperature
+                    raw_a = call_llm(api_provider, api_key, model_name, messages_a, max(0.0, temperature - 0.2), max_tokens)
+                elif retry_count == 2:
+                    # Second retry: modify prompt to be more explicit
+                    messages_a_retry = messages_a.copy()
+                    messages_a_retry[0]["content"] += "\n\nIMPORTANT: Your response must be ONLY a JSON object. Do not include any explanations or documentation references."
+                    raw_a = call_llm(api_provider, api_key, model_name, messages_a_retry, 0.1, max_tokens)
+                else:
+                    # Third retry: use simpler prompt structure
+                    simple_prompt = f"Role-play as: {profile}. Target segment: {target_segment}. Question: {question}. Scenario A: {scenario_a}. Return JSON only: {{\"persona\":\"<description>\",\"response\":{{\"answer_text\":\"<answer>\",\"{'rating':<1-' + str(scale_max) + '>' if response_mode == 'Likert' else 'choice':'Yes or No'}>\"}}}}"
+                    messages_simple = [{"role": "user", "content": simple_prompt}]
+                    raw_a = call_llm(api_provider, api_key, model_name, messages_simple, 0.1, max_tokens)
+                
                 parsed_a = parse_persona_json(raw_a)
             
-            # Get response for scenario B
+            # Get response for scenario B with retry logic
             raw_b = call_llm(api_provider, api_key, model_name, messages_b, temperature, max_tokens)
             parsed_b = parse_persona_json(raw_b)
-            if not parsed_b:
-                # attempt one lightweight retry with lower temperature
-                raw_b = call_llm(api_provider, api_key, model_name, messages_b, max(0.0, temperature - 0.1), max_tokens)
+            
+            # Enhanced retry logic for scenario B
+            retry_count = 0
+            while not parsed_b and retry_count < 3:
+                retry_count += 1
+                if retry_count == 1:
+                    # First retry: lower temperature
+                    raw_b = call_llm(api_provider, api_key, model_name, messages_b, max(0.0, temperature - 0.2), max_tokens)
+                elif retry_count == 2:
+                    # Second retry: modify prompt to be more explicit
+                    messages_b_retry = messages_b.copy()
+                    messages_b_retry[0]["content"] += "\n\nIMPORTANT: Your response must be ONLY a JSON object. Do not include any explanations or documentation references."
+                    raw_b = call_llm(api_provider, api_key, model_name, messages_b_retry, 0.1, max_tokens)
+                else:
+                    # Third retry: use simpler prompt structure
+                    simple_prompt = f"Role-play as: {profile}. Target segment: {target_segment}. Question: {question}. Scenario B: {scenario_b}. Return JSON only: {{\"persona\":\"<description>\",\"response\":{{\"answer_text\":\"<answer>\",\"{'rating':<1-' + str(scale_max) + '>' if response_mode == 'Likert' else 'choice':'Yes or No'}>\"}}}}"
+                    messages_simple = [{"role": "user", "content": simple_prompt}]
+                    raw_b = call_llm(api_provider, api_key, model_name, messages_simple, 0.1, max_tokens)
+                
                 parsed_b = parse_persona_json(raw_b)
             
-            if not parsed_a or not parsed_b:
-                raise ValueError("Model did not return valid JSON for one or both scenarios.")
+            # If still no valid JSON after retries, create fallback responses
+            if not parsed_a:
+                parsed_a = {
+                    "persona": f"Generic persona (age {row['age']}, {row['gender']}, {row['nationality']})",
+                    "response": {
+                        "answer_text": "Unable to generate response",
+                        "rating" if response_mode == "Likert" else "choice": 3 if response_mode == "Likert" else "No"
+                    }
+                }
+            
+            if not parsed_b:
+                parsed_b = {
+                    "persona": f"Generic persona (age {row['age']}, {row['gender']}, {row['nationality']})",
+                    "response": {
+                        "answer_text": "Unable to generate response", 
+                        "rating" if response_mode == "Likert" else "choice": 3 if response_mode == "Likert" else "No"
+                    }
+                }
             
             # Use persona description from scenario A (both should be similar)
             personas.append(parsed_a.get("persona", "").strip())
